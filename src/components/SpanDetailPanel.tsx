@@ -51,7 +51,7 @@ export function SpanDetailPanel({ span }: SpanDetailPanelProps) {
   const spanStatus = getSpanStatus(span);
 
   const renderValue = (value: unknown) => {
-    const raw = decodeUnicodeEscapes(String(value));
+    const raw = decodeUnicodeEscapes(value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value));
     const expanded = expandStrings ? tryExpandString(raw) : raw;
     return expanded !== raw
       ? <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'inherit' }}>{expanded}</pre>

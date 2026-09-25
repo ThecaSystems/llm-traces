@@ -38,7 +38,17 @@ export interface PluginSpan {
   statusMessage?: string;
 }
 
-function parseOtlpValue(val: { stringValue?: string; intValue?: string; doubleValue?: number; boolValue?: boolean; arrayValue?: { values?: Array<{ stringValue?: string; intValue?: string; doubleValue?: number; boolValue?: boolean }> }; kvlistValue?: unknown }): unknown {
+interface OtlpValue {
+  stringValue?: string;
+  intValue?: string;
+  doubleValue?: number;
+  boolValue?: boolean;
+  bytesValue?: string;
+  arrayValue?: { values?: OtlpValue[] };
+  kvlistValue?: { values?: Array<{ key: string; value: OtlpValue }> };
+}
+
+export function parseOtlpValue(val: OtlpValue): unknown {
   if (val.stringValue !== undefined) {
     return val.stringValue;
   }
@@ -51,39 +61,23 @@ function parseOtlpValue(val: { stringValue?: string; intValue?: string; doubleVa
   if (val.boolValue !== undefined) {
     return val.boolValue;
   }
-  // BUG-036 fix: arrayValue returns ALL elements joined, not just the first.
-  if (val.arrayValue?.values && val.arrayValue.values.length > 0) {
-    const parts = val.arrayValue.values.map((item) => {
-      if (item.stringValue !== undefined) { return String(item.stringValue); }
-      if (item.intValue !== undefined) { return String(Number(item.intValue)); }
-      if (item.doubleValue !== undefined) { return String(item.doubleValue); }
-      if (item.boolValue !== undefined) { return String(item.boolValue); }
-      return '';
-    });
-    return parts.join(', ');
+  // Keep nested values structured: finish reasons are arrays, and future
+  // GenAI message content can contain parts encoded as OTLP arrays/kv-lists.
+  if (val.arrayValue !== undefined) {
+    return (val.arrayValue.values ?? []).map(parseOtlpValue);
   }
-  // BUG-037 fix: handle kvlistValue — serialize as key=value pairs.
-  if ((val as any).kvlistValue !== undefined) {
-    const kv = (val as any).kvlistValue as { values?: Array<{ key: string; value: { stringValue?: string; intValue?: string; doubleValue?: number; boolValue?: boolean } }> };
-    if (kv?.values && kv.values.length > 0) {
-      return kv.values.map((entry) => {
-        const v = parseOtlpValue(entry.value as Parameters<typeof parseOtlpValue>[0]);
-        return `${entry.key}=${v}`;
-      }).join(', ');
-    }
-    return '';
+  if (val.kvlistValue !== undefined) {
+    return Object.fromEntries((val.kvlistValue.values ?? []).map((entry) => [entry.key, parseOtlpValue(entry.value)]));
   }
-  // BUG-049 fix: handle bytesValue — return base64 string or '(binary)'.
-  if ((val as any).bytesValue !== undefined) {
-    const bv = (val as any).bytesValue;
-    return typeof bv === 'string' ? bv : '(binary)';
+  if (val.bytesValue !== undefined) {
+    return val.bytesValue;
   }
   return '';
 }
 
 interface OtlpAttribute {
   key: string;
-  value: { stringValue?: string; intValue?: string; doubleValue?: number; boolValue?: boolean; arrayValue?: { values?: Array<{ stringValue?: string; intValue?: string; doubleValue?: number; boolValue?: boolean }> }; kvlistValue?: unknown };
+  value: OtlpValue;
 }
 
 interface OtlpSpan {
@@ -137,7 +131,7 @@ function safeBigIntMs(nanoStr: string | undefined): number {
   }
 }
 
-function parseOtlpTrace(data: unknown): PluginSpan[] {
+export function parseOtlpTrace(data: unknown): PluginSpan[] {
   const flatSpans: PluginSpan[] = [];
 
   // Normalise the many possible top-level shapes into a single resourceSpans array.

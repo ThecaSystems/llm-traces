@@ -1,14 +1,14 @@
 # LLM Traces — Grafana Plugin
 
-[![CI](https://github.com/agoda-com/llm-traces/actions/workflows/ci.yml/badge.svg)](https://github.com/agoda-com/llm-traces/actions/workflows/ci.yml)
+[![CI](https://github.com/ThecaSystems/llm-traces/actions/workflows/ci.yml/badge.svg)](https://github.com/ThecaSystems/llm-traces/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-A Grafana app plugin for visualizing LLM (Large Language Model) traces stored in [Grafana Tempo](https://grafana.com/oss/tempo/).
+A Grafana app plugin for visualizing LLM (Large Language Model) traces stored in [Grafana Tempo](https://grafana.com/oss/tempo/). This is Theca Systems' public fork of [Agoda's llm-traces](https://github.com/agoda-com/llm-traces).
 
 Supports multiple span conventions out of the box:
 
 - **OpenInference** (Phoenix, Traceloop, etc.)
-- **OTel GenAI** (OpenTelemetry Semantic Conventions for GenAI)
+- **OTel GenAI** ([OpenTelemetry Semantic Conventions for GenAI](https://github.com/open-telemetry/semantic-conventions-genai/tree/e57c543b4889619eb2a05702471937db5119165d), as of commit `e57c543b`)
 - **Vertex AI** (GCP Vertex AI Agent Builder)
 
 ## Features
@@ -23,6 +23,14 @@ Supports multiple span conventions out of the box:
 
 <img src="docs/images/llm-traces-screenshot.png" alt="LLM Traces plugin showing trace list, span timeline with duration bars, and LLM span detail with input/output messages" width="100%">
 
+OTel GenAI spans use `gen_ai.operation.name` and `gen_ai.provider.name`. Optional
+`gen_ai.input.messages`, `gen_ai.output.messages`, and `gen_ai.system_instructions`
+are read as schema-defined `role`/`parts` content (JSON strings or structured
+attributes). Text, reasoning, tool calls/results, and media placeholders are
+shown without rendering raw binary data. Agent, tool, workflow, embedding,
+retrieval, and memory operations remain visible without counting as model
+inference. Older OpenInference, Vertex, and pre-standard GenAI data still render.
+
 ## Requirements
 
 | Component | Version |
@@ -35,7 +43,7 @@ Supports multiple span conventions out of the box:
 
 ### From GitHub Releases (recommended)
 
-1. Download the latest release zip from the [Releases](https://github.com/agoda-com/llm-traces/releases) page
+1. Download the latest release zip from the [Releases](https://github.com/ThecaSystems/llm-traces/releases) page
 2. Extract it into your Grafana plugins directory:
    ```bash
    unzip llm-traces-app-*.zip -d /var/lib/grafana/plugins/
@@ -115,4 +123,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed contribution guidelines.
 
 [Apache-2.0](LICENSE)
 
-Copyright 2026 Agoda Services Co., Ltd.
+Copyright 2026 Agoda Services Co., Ltd. (original work). Theca Systems modifications are also licensed under Apache-2.0.

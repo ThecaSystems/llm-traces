@@ -16,6 +16,8 @@ export interface LlmMessage {
   role: string;
   content: string;
   toolCalls?: LlmToolCall[];
+  reasoning?: string[];
+  finishReason?: string;
 }
 
 export interface LlmToolCall {
@@ -28,6 +30,9 @@ export interface LlmTokenUsage {
   input?: number;
   output?: number;
   total?: number;
+  cacheReadInput?: number;
+  cacheWriteInput?: number;
+  reasoningOutput?: number;
 }
 
 export interface LlmInvocationParams {
@@ -72,7 +77,7 @@ function getAttr(tags: KeyValuePair[], key: string): string | undefined {
   const tag = tags.find((t) => t.key === key);
   if (tag === undefined) return undefined;
   if (tag.value === null || tag.value === undefined) return undefined;
-  return decodeUnicodeEscapes(String(tag.value));
+  return decodeUnicodeEscapes(typeof tag.value === 'object' ? JSON.stringify(tag.value) : String(tag.value));
 }
 
 function getNumAttr(tags: KeyValuePair[], key: string): number | undefined {
@@ -99,6 +104,77 @@ function looksLikeMessages(value: string): boolean {
 
 function isRecord(val: unknown): val is Record<string, unknown> {
   return typeof val === 'object' && val !== null && !Array.isArray(val);
+}
+
+// OTel GenAI content follows the versioned role/parts JSON schemas. Span attributes
+// are JSON strings until structured span attributes are supported by the SDK/backend.
+// https://github.com/open-telemetry/semantic-conventions-genai/tree/e57c543b4889619eb2a05702471937db5119165d/model/gen-ai
+function parseStructuredValue(value: unknown): unknown {
+  let parsed = value;
+  for (let i = 0; i < 2 && typeof parsed === 'string'; i++) {
+    try { parsed = JSON.parse(parsed); } catch { break; }
+  }
+  return parsed;
+}
+
+function formatPartValue(value: unknown): string {
+  return typeof value === 'string' ? value : JSON.stringify(value) ?? '';
+}
+
+function extractSemconvMessages(raw: unknown): LlmMessage[] {
+  const value = parseStructuredValue(raw);
+  if (!Array.isArray(value)) return [];
+  return value.filter(isRecord).map((message) => {
+    const content: string[] = [];
+    const reasoning: string[] = [];
+    const toolCalls: LlmToolCall[] = [];
+    for (const part of Array.isArray(message.parts) ? message.parts : []) {
+      if (!isRecord(part)) continue;
+      switch (part.type) {
+        case 'text':
+          if (typeof part.content === 'string') content.push(part.content);
+          break;
+        case 'reasoning':
+          if (typeof part.content === 'string') reasoning.push(part.content);
+          break;
+        case 'tool_call':
+        case 'server_tool_call':
+          toolCalls.push({ name: String(part.name ?? 'unknown'), arguments: formatPartValue(part.arguments ?? part.server_tool_call ?? {}), ...(part.id != null ? { id: String(part.id) } : {}) });
+          break;
+        case 'tool_call_response':
+        case 'server_tool_call_response':
+          if (part.response != null || part.server_tool_call_response != null) {
+            content.push(formatPartValue(part.response ?? part.server_tool_call_response));
+          }
+          break;
+        case 'blob':
+        case 'uri':
+        case 'file':
+          content.push(`[${String(part.modality ?? part.type)} content]`);
+          break;
+        case 'compaction':
+          if (typeof part.content === 'string') content.push(part.content);
+          break;
+        // Custom parts remain visible in the raw span attributes; never render
+        // unknown inline media as text or accidentally expose base64 payloads.
+      }
+    }
+    return {
+      role: String(message.role ?? 'unknown'),
+      content: content.join('\n\n'),
+      ...(reasoning.length > 0 ? { reasoning } : {}),
+      ...(toolCalls.length > 0 ? { toolCalls } : {}),
+      ...(typeof message.finish_reason === 'string' ? { finishReason: message.finish_reason } : {}),
+    };
+  });
+}
+
+function extractSemconvInstructions(raw: unknown): LlmMessage[] {
+  const value = parseStructuredValue(raw);
+  if (!Array.isArray(value)) return [];
+  const text = value.filter(isRecord).filter((part) => part.type === 'text' && typeof part.content === 'string')
+    .map((part) => String(part.content));
+  return text.length > 0 ? [{ role: 'system', content: text.join('\n\n') }] : [];
 }
 
 function normalizeToolCalls(raw: unknown): LlmToolCall[] | undefined {
@@ -349,6 +425,11 @@ function detectConvention(tags: KeyValuePair[]): LlmConvention | null {
     return 'openinference';
   }
   const genAiSystem = getAttr(tags, 'gen_ai.system');
+  // OTel operation/provider are authoritative even on mixed-format spans.
+  // An explicit OpenInference span kind above still takes precedence.
+  if (getAttr(tags, 'gen_ai.operation.name') || getAttr(tags, 'gen_ai.provider.name')) {
+    return 'otel-genai';
+  }
   if (genAiSystem && (genAiSystem.includes('vertex') || genAiSystem.includes('gcp'))) {
     return 'vertex';
   }
@@ -492,7 +573,14 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
   // Prefer gen_ai.response.model when present — after streaming/routing the served model may differ
   // from the requested model (e.g. provider-side aliasing or fallback routing).
   const model = getAttr(tags, 'gen_ai.response.model') || getAttr(tags, 'gen_ai.request.model') || getAttr(tags, 'llm.request.model') || 'unknown';
-  const { input: inputMessages, output: outputMessages } = extractMessagesFromEvents(logs);
+  const fromEvents = extractMessagesFromEvents(logs);
+  const inputMessages = extractSemconvMessages(tags.find((t) => t.key === 'gen_ai.input.messages')?.value);
+  const outputMessages = extractSemconvMessages(tags.find((t) => t.key === 'gen_ai.output.messages')?.value);
+  // Current span attributes take precedence over legacy span events and
+  // compatibility projections. Instructions are separate from chat history.
+  const instructions = extractSemconvInstructions(tags.find((t) => t.key === 'gen_ai.system_instructions')?.value);
+  if (inputMessages.length === 0) inputMessages.push(...fromEvents.input);
+  if (outputMessages.length === 0) outputMessages.push(...fromEvents.output);
   if (inputMessages.length === 0) {
     const prompt = getAttr(tags, 'gen_ai.prompt');
     if (prompt) {
@@ -527,33 +615,43 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
     // Traceloop flat-indexed format: gen_ai.completion.{i}.role / gen_ai.completion.{i}.content
     outputMessages.push(...extractIndexedMessages(tags, 'gen_ai.completion.'));
   }
-  const finishReasonsRaw = getAttr(tags, 'gen_ai.response.finish_reasons');
-  let finishReasonFromArray: string | undefined;
-  if (finishReasonsRaw) {
-    try {
-      const arr = JSON.parse(finishReasonsRaw);
-      if (Array.isArray(arr) && arr.length > 0) finishReasonFromArray = String(arr[0]);
-    } catch { /* not an array */ }
+  if (instructions.length > 0) inputMessages.unshift(...instructions);
+  const finishReasons = parseStructuredValue(tags.find((t) => t.key === 'gen_ai.response.finish_reasons')?.value);
+  if (Array.isArray(finishReasons)) {
+    outputMessages.forEach((message, index) => {
+      if (finishReasons[index] != null) message.finishReason = String(finishReasons[index]);
+    });
   }
-  const finishReason = getAttr(tags, 'gen_ai.response.finish_reasons.0')
-    ?? finishReasonFromArray
+  const finishReason = outputMessages[0]?.finishReason
+    ?? (Array.isArray(finishReasons) && finishReasons.length > 0 ? String(finishReasons[0]) : undefined)
+    ?? getAttr(tags, 'gen_ai.response.finish_reasons.0')
     ?? getAttr(tags, 'gen_ai.finish_reason');
   const precomputedCostUsd = getNumAttr(tags, 'gen_ai.cost.total_cost');
+  const inputTokens = getNumAttr(tags, 'gen_ai.usage.input_tokens') ?? getNumAttr(tags, 'gen_ai.usage.prompt_tokens');
+  const outputTokens = getNumAttr(tags, 'gen_ai.usage.output_tokens') ?? getNumAttr(tags, 'gen_ai.usage.completion_tokens');
   return {
     convention: 'otel-genai',
     model,
-    system: getAttr(tags, 'gen_ai.system'),
+    system: getAttr(tags, 'gen_ai.provider.name') ?? getAttr(tags, 'gen_ai.system'),
     inputMessages,
     outputMessages,
     tokenUsage: {
-      input: getNumAttr(tags, 'gen_ai.usage.input_tokens') ?? getNumAttr(tags, 'gen_ai.usage.prompt_tokens'),
-      output: getNumAttr(tags, 'gen_ai.usage.output_tokens') ?? getNumAttr(tags, 'gen_ai.usage.completion_tokens'),
-      total: getNumAttr(tags, 'gen_ai.usage.total_tokens'),
+      input: inputTokens,
+      output: outputTokens,
+      total: getNumAttr(tags, 'gen_ai.usage.total_tokens') ?? (inputTokens !== undefined && outputTokens !== undefined ? inputTokens + outputTokens : undefined),
+      cacheReadInput: getNumAttr(tags, 'gen_ai.usage.cache_read.input_tokens'),
+      cacheWriteInput: getNumAttr(tags, 'gen_ai.usage.cache_write.input_tokens'),
+      reasoningOutput: getNumAttr(tags, 'gen_ai.usage.reasoning.output_tokens'),
     },
     invocationParams: {
       temperature: getNumAttr(tags, 'gen_ai.request.temperature'),
       maxTokens: getNumAttr(tags, 'gen_ai.request.max_tokens'),
       topP: getNumAttr(tags, 'gen_ai.request.top_p'),
+      ...(getAttr(tags, 'gen_ai.request.reasoning.level') ? { reasoningLevel: getAttr(tags, 'gen_ai.request.reasoning.level') } : {}),
+      ...(getAttr(tags, 'gen_ai.request.stream') !== undefined ? { stream: getAttr(tags, 'gen_ai.request.stream') === 'true' } : {}),
+      ...(getNumAttr(tags, 'gen_ai.request.seed') !== undefined ? { seed: getNumAttr(tags, 'gen_ai.request.seed') } : {}),
+      ...(getNumAttr(tags, 'gen_ai.request.choice.count') !== undefined ? { choiceCount: getNumAttr(tags, 'gen_ai.request.choice.count') } : {}),
+      ...(getAttr(tags, 'gen_ai.output.type') ? { outputType: getAttr(tags, 'gen_ai.output.type') } : {}),
       // gen_ai.request.top_k is used by Anthropic, Gemini and other providers.
       // It must be included explicitly here because the LlmInvocationParams index type
       // only passes through named fields; unknown keys from tags are not auto-collected.
@@ -651,7 +749,9 @@ export function extractLlmSpanData(tags: KeyValuePair[], logs: SpanLog[], operat
   // CHAIN, TOOL, RETRIEVER etc. are structural spans, not the model call itself.
   const isLlm = convention === 'openinference'
     ? data.spanKind?.toUpperCase() === 'LLM' || data.spanKind?.toUpperCase() === 'GUARDRAIL'
-    : true;
+    : convention === 'otel-genai' && getAttr(tags, 'gen_ai.operation.name')
+      ? INFERENCE_OPERATIONS.has(getAttr(tags, 'gen_ai.operation.name')!.toLowerCase())
+      : true;
   return { isLlm, ...data };
 }
 
@@ -665,8 +765,8 @@ export function isOpenInferenceSpan(tags: KeyValuePair[]): boolean {
 
 export function isEmbeddingSpan(tags: KeyValuePair[]): boolean {
   const requestType = tags.find((t) => t.key === 'llm.request.type');
-  if (requestType) {
-    return String(requestType.value).toLowerCase().includes('embedding');
+  if (requestType && String(requestType.value).toLowerCase().includes('embedding')) {
+    return true;
   }
   const opName = tags.find((t) => t.key === 'gen_ai.operation.name');
   if (opName) {
@@ -688,6 +788,8 @@ export function isLlmSpan(tags: KeyValuePair[]): boolean {
     const kind = String(oiKind.value).toUpperCase();
     return kind === 'LLM' || kind === 'GUARDRAIL';
   }
+  const operation = getAttr(tags, 'gen_ai.operation.name');
+  if (operation) return INFERENCE_OPERATIONS.has(operation.toLowerCase());
   if (tags.some(
     (t) =>
       t.key === 'gen_ai.system' ||
@@ -720,17 +822,33 @@ export function isGuardrailSpan(tags: KeyValuePair[]): boolean {
   return false;
 }
 
+// Only inference operations count as model calls; tool, agent, memory and
+// retrieval operations are AI spans, but not LLM spans or token-bearing calls.
+const INFERENCE_OPERATIONS = new Set(['chat', 'text_completion', 'generate_content', 'completions', 'generate']);
+
 // Maps gen_ai.operation.name values (OTel GenAI spec) to normalized span kind labels.
 const OTEL_OPERATION_TO_KIND: Record<string, string> = {
   // LLM
   chat: 'LLM',
   text_completion: 'LLM',
+  generate_content: 'LLM',
+  fetch_response: 'RESPONSE',
   completions: 'LLM',
   generate: 'LLM',
   // AGENT
   invoke_agent: 'AGENT',
   execute_agent: 'AGENT',
   create_agent: 'AGENT',
+  invoke_workflow: 'WORKFLOW',
+  plan: 'PLAN',
+  retrieval: 'RETRIEVER',
+  create_memory: 'MEMORY',
+  update_memory: 'MEMORY',
+  upsert_memory: 'MEMORY',
+  delete_memory: 'MEMORY',
+  search_memory: 'MEMORY',
+  create_memory_store: 'MEMORY',
+  delete_memory_store: 'MEMORY',
   // TOOL
   execute_tool: 'TOOL',
   tool_call: 'TOOL',

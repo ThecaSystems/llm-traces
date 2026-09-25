@@ -7,13 +7,13 @@
   "info": {
     "keywords": ["llm", "traces", "openinference", "observability", "genai", "otel"],
     "description": "LLM trace visualization for OpenInference, OTel GenAI and Vertex AI spans stored in Grafana Tempo",
-    "author": { "name": "Agoda", "url": "https://github.com/agoda-com" },
+    "author": { "name": "Theca Systems", "url": "https://github.com/ThecaSystems" },
     "logos": { "small": "img/logo.svg", "large": "img/logo.svg" },
     "screenshots": [
       { "name": "LLM Traces", "path": "img/llm-traces-screenshot.png" }
     ],
-    "version": "0.0.1",
-    "updated": "2026-04-06"
+    "version": "0.0.2",
+    "updated": "2026-09-25"
   },
   "includes": [
     {

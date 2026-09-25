@@ -11,7 +11,7 @@ Thank you for your interest in contributing! This guide will help you get starte
 ## Development Setup
 
 ```bash
-git clone https://github.com/agoda-com/llm-traces.git
+git clone https://github.com/ThecaSystems/llm-traces.git
 cd llm-traces
 npm install
 ```
@@ -61,7 +61,7 @@ npm run lint
 
 ## Reporting Issues
 
-Use [GitHub Issues](https://github.com/agoda-com/llm-traces/issues) for bug reports and feature requests.
+Use [GitHub Issues](https://github.com/ThecaSystems/llm-traces/issues) for bug reports and feature requests.
 
 ## License
 

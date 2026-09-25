@@ -5,6 +5,8 @@ import {
   extractLlmSpanData,
   isLlmSpan,
   isEmbeddingSpan,
+  isAiSpan,
+  getSpanKind,
   type KeyValuePair,
   type SpanLog,
 } from '../src/utils/llmUtils.ts';
@@ -1580,6 +1582,104 @@ describe('BUG-084: single-object message with content="" uses ?? (empty string k
   const result = extractLlmSpanData(tags, []);
   assertEquals(result.inputMessages.length, 1, 'message extracted');
   assertEquals(result.inputMessages[0].content, '', 'empty content kept with ??, not overridden by text');
+});
+
+// ---------------------------------------------------------------------------
+// OTel GenAI conventions (semantic-conventions-genai e57c543b)
+// ---------------------------------------------------------------------------
+
+describe('OTel GenAI role/parts attributes take precedence over legacy events and underscore projections', () => {
+  const tags = [
+    kv('gen_ai.operation.name', 'chat'),
+    kv('gen_ai.provider.name', 'openai'),
+    kv('gen_ai.request.model', 'gpt-4o'),
+    kv('gen_ai.response.model', 'gpt-4o-2024-08-06'),
+    kv('gen_ai.system_instructions', JSON.stringify([{ type: 'text', content: 'Be concise.' }])),
+    kv('gen_ai.input.messages', JSON.stringify([
+      { role: 'user', parts: [{ type: 'text', content: 'Weather?' }, { type: 'uri', modality: 'image', uri: 'https://example.com/private.png' }] },
+      { role: 'assistant', parts: [{ type: 'tool_call', id: 'call_1', name: 'weather', arguments: { city: 'Paris' } }] },
+      { role: 'tool', parts: [{ type: 'tool_call_response', id: 'call_1', response: { temperature: 17 } }] },
+    ])),
+    kv('gen_ai.output.messages', JSON.stringify([
+      { role: 'assistant', parts: [{ type: 'reasoning', content: 'Check the forecast.' }, { type: 'text', content: '17°C and cloudy.' }], finish_reason: 'stop' },
+    ])),
+    kv('gen_ai.input_messages', '[{"role":"user","content":"wrong legacy text"}]'),
+    kv('gen_ai.usage.input_tokens', 120),
+    kv('gen_ai.usage.output_tokens', 35),
+    kv('gen_ai.usage.cache_read.input_tokens', 20),
+    kv('gen_ai.usage.reasoning.output_tokens', 5),
+    kv('gen_ai.request.stream', true),
+    kv('gen_ai.request.reasoning.level', 'low'),
+    kv('gen_ai.response.finish_reasons', ['stop']),
+  ];
+  const result = extractLlmSpanData(tags, [log('gen_ai.content.prompt', [kv('gen_ai.prompt', 'obsolete event')])]);
+  assertEquals(result.convention, 'otel-genai', 'operation/provider without gen_ai.system is OTel');
+  assertEquals(result.isLlm, true, 'chat is an inference span');
+  assertEquals(result.model, 'gpt-4o-2024-08-06', 'served model preferred');
+  assertEquals(result.system, 'openai', 'provider name displayed, not legacy system');
+  assertDeepEquals(result.inputMessages.map((m) => m.role), ['system', 'user', 'assistant', 'tool'], 'instructions precede ordered history');
+  assertEquals(result.inputMessages[1].content, 'Weather?\n\n[image content]', 'text and media placeholder retained');
+  assert(!JSON.stringify(result.inputMessages).includes('private.png'), 'media URI is not rendered as text');
+  assertEquals(result.inputMessages[2].toolCalls?.[0].name, 'weather', 'tool call name');
+  assertEquals(result.inputMessages[2].toolCalls?.[0].arguments, '{"city":"Paris"}', 'tool arguments formatted');
+  assertEquals(result.inputMessages[3].content, '{"temperature":17}', 'tool result is readable');
+  assertEquals(result.outputMessages[0].content, '17°C and cloudy.', 'text output extracted');
+  assertDeepEquals(result.outputMessages[0].reasoning, ['Check the forecast.'], 'reasoning preserved separately');
+  assertEquals(result.finishReason, 'stop', 'native finish-reason array');
+  assertEquals(result.tokenUsage.total, 155, 'aggregate total derived without double-counting cached/reasoning subsets');
+  assertEquals(result.tokenUsage.cacheReadInput, 20, 'cache tokens subset exposed');
+  assertEquals(result.tokenUsage.reasoningOutput, 5, 'reasoning tokens subset exposed');
+  assertEquals(result.invocationParams.stream, true, 'stream flag');
+  assertEquals(result.invocationParams.reasoningLevel, 'low', 'reasoning effort');
+});
+
+describe('OTel structured span attributes and instructions-only history', () => {
+  const result = extractLlmSpanData([
+    kv('gen_ai.operation.name', 'generate_content'),
+    kv('gen_ai.provider.name', 'gcp.vertex_ai'),
+    kv('gen_ai.system_instructions', [{ type: 'text', content: 'Translate to French.' }]),
+    kv('gen_ai.input.messages', [{ role: 'user', parts: [{ type: 'text', content: 'Hello' }] }]),
+    kv('gen_ai.output.messages', [
+      { role: 'assistant', parts: [{ type: 'text', content: 'Bonjour' }] },
+      { role: 'assistant', parts: [{ type: 'text', content: 'Salut' }] },
+    ]),
+    kv('gen_ai.response.finish_reasons', ['stop', 'length']),
+  ], []);
+  assertEquals(result.convention, 'otel-genai', 'modern Vertex provider uses OTel convention');
+  assertEquals(result.inputMessages[0].content, 'Translate to French.', 'structured instructions parsed');
+  assertEquals(result.inputMessages[1].content, 'Hello', 'structured input parsed');
+  assertEquals(result.outputMessages[0].content, 'Bonjour', 'structured output parsed');
+  assertEquals(result.finishReason, 'stop', 'first finish reason matches first output');
+  assertEquals(result.outputMessages[0].finishReason, 'stop', 'first choice finish reason');
+  assertEquals(result.outputMessages[1].finishReason, 'length', 'second choice finish reason');
+  const instructionsOnly = extractLlmSpanData([
+    kv('gen_ai.operation.name', 'invoke_agent'),
+    kv('gen_ai.system_instructions', '[{"type":"text","content":"System"}]'),
+    kv('gen_ai.input_messages', '[{"role":"user","content":"Old input"}]'),
+  ], []);
+  assertDeepEquals(instructionsOnly.inputMessages.map((m) => m.content), ['System', 'Old input'], 'instructions do not mask legacy messages');
+});
+
+describe('OTel operations distinguish model calls from agent, tool, retrieval, memory and embedding spans', () => {
+  for (const [operation, kind] of Object.entries({
+    invoke_agent: 'AGENT', invoke_workflow: 'WORKFLOW', execute_tool: 'TOOL', embeddings: 'EMBEDDING',
+    retrieval: 'RETRIEVER', plan: 'PLAN', search_memory: 'MEMORY', create_memory: 'MEMORY', fetch_response: 'RESPONSE',
+  })) {
+    const tags = [kv('gen_ai.operation.name', operation), kv('gen_ai.provider.name', 'openai')];
+    assert(isAiSpan(tags), `${operation} is an AI span`);
+    assertEquals(isLlmSpan(tags), false, `${operation} is not an inference call`);
+    assertEquals(extractLlmSpanData(tags, []).isLlm, false, `${operation} detail is not an inference call`);
+    assertEquals(getSpanKind(tags), kind, `${operation} has a display kind`);
+  }
+  for (const operation of ['chat', 'text_completion', 'generate_content']) {
+    const tags = [kv('gen_ai.operation.name', operation), kv('gen_ai.provider.name', 'openai')];
+    assert(isLlmSpan(tags), `${operation} is an inference call`);
+    assertEquals(getSpanKind(tags), 'LLM', `${operation} has LLM kind`);
+  }
+  const mixed = [kv('gen_ai.operation.name', 'chat'), kv('gen_ai.provider.name', 'openai'), kv('llm.model_name', 'legacy')];
+  assertEquals(extractLlmSpanData(mixed, []).convention, 'otel-genai', 'OTel operation wins over old model-name hint');
+  const mixedVertex = [kv('gen_ai.system', 'vertex_ai'), kv('gen_ai.provider.name', 'gcp.vertex_ai'), kv('gen_ai.operation.name', 'chat')];
+  assertEquals(extractLlmSpanData(mixedVertex, []).convention, 'otel-genai', 'OTel provider wins over legacy Vertex system hint');
 });
 
 // ---------------------------------------------------------------------------
