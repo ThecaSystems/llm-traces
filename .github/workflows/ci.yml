@@ -43,6 +43,9 @@ jobs:
       - name: Build
         run: npm run build:standalone
 
+      - name: Verify attribution in bundle
+        run: test -f dist/LICENSE && test -f dist/NOTICE
+
       - name: Verify plugin version match
         run: |
           PKG_VERSION=$(node -p "require('./package.json').version")

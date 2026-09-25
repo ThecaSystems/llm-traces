@@ -425,13 +425,13 @@ function detectConvention(tags: KeyValuePair[]): LlmConvention | null {
     return 'openinference';
   }
   const genAiSystem = getAttr(tags, 'gen_ai.system');
-  if (genAiSystem && (genAiSystem.includes('vertex') || genAiSystem.includes('gcp'))) {
-    return 'vertex';
-  }
   // OTel operation/provider are authoritative even on mixed-format spans.
   // An explicit OpenInference span kind above still takes precedence.
   if (getAttr(tags, 'gen_ai.operation.name') || getAttr(tags, 'gen_ai.provider.name')) {
     return 'otel-genai';
+  }
+  if (genAiSystem && (genAiSystem.includes('vertex') || genAiSystem.includes('gcp'))) {
+    return 'vertex';
   }
   // Only classify as openinference when gen_ai.system is absent — if it's present the span
   // follows OTel GenAI convention even if it also carries llm.request.type (Traceloop compat).

@@ -1678,6 +1678,8 @@ describe('OTel operations distinguish model calls from agent, tool, retrieval, m
   }
   const mixed = [kv('gen_ai.operation.name', 'chat'), kv('gen_ai.provider.name', 'openai'), kv('llm.model_name', 'legacy')];
   assertEquals(extractLlmSpanData(mixed, []).convention, 'otel-genai', 'OTel operation wins over old model-name hint');
+  const mixedVertex = [kv('gen_ai.system', 'vertex_ai'), kv('gen_ai.provider.name', 'gcp.vertex_ai'), kv('gen_ai.operation.name', 'chat')];
+  assertEquals(extractLlmSpanData(mixedVertex, []).convention, 'otel-genai', 'OTel provider wins over legacy Vertex system hint');
 });
 
 // ---------------------------------------------------------------------------
