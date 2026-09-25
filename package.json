@@ -1,16 +1,16 @@
 {
   "name": "llm-traces-app",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Grafana app plugin for visualizing LLM traces stored in Tempo",
   "license": "Apache-2.0",
-  "author": "Agoda",
+  "author": "Theca Systems (fork of Agoda)",
   "repository": {
     "type": "git",
-    "url": "https://github.com/agoda-com/llm-traces.git"
+    "url": "https://github.com/ThecaSystems/llm-traces.git"
   },
-  "homepage": "https://github.com/agoda-com/llm-traces",
+  "homepage": "https://github.com/ThecaSystems/llm-traces",
   "bugs": {
-    "url": "https://github.com/agoda-com/llm-traces/issues"
+    "url": "https://github.com/ThecaSystems/llm-traces/issues"
   },
   "keywords": ["grafana", "llm", "traces", "openinference", "observability", "genai", "otel", "tempo"],
   "private": true,

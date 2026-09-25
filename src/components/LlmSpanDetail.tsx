@@ -157,7 +157,7 @@ function MessageBlock({ message, defaultOpen = true }: { message: LlmMessage; de
   const [showMarkdown, setShowMarkdown] = useState(false);
   const roleStyle = getRoleStyle(message.role, styles);
   const icon = getRoleIcon(message.role);
-  const canMarkdown = markedParse !== null && !!message.content;
+  const canMarkdown = markedParse !== null && !!message.content && !message.reasoning?.length && !message.toolCalls?.length;
 
   return (
     <div className={styles.message} data-testid={`message-block-${message.role}`}>
@@ -174,6 +174,7 @@ function MessageBlock({ message, defaultOpen = true }: { message: LlmMessage; de
             message.role === 'human' ? 'user' :
             message.role
           }</span>
+          {message.finishReason && <FinishReasonBadge reason={message.finishReason} />}
         </div>
         {canMarkdown && isOpen && (
           <button
@@ -199,6 +200,12 @@ function MessageBlock({ message, defaultOpen = true }: { message: LlmMessage; de
                 <div style={{ fontSize: '10px', color: 'inherit', opacity: 0.45, marginTop: '4px', textAlign: 'right' }}>
                   {message.content.split(/\s+/).filter(Boolean).length} words · {message.content.length} chars
                   {countTokens && ` · ~${countTokens(message.content).toLocaleString()} tokens`}
+                </div>
+              )}
+              {message.reasoning && message.reasoning.length > 0 && (
+                <div className={styles.toolCallBlock}>
+                  <div className={styles.toolCallName}>Reasoning</div>
+                  <div className={styles.toolCallArgs}>{message.reasoning.join('\n\n')}</div>
                 </div>
               )}
               {message.toolCalls && message.toolCalls.length > 0 && (
@@ -243,6 +250,13 @@ function TokenUsageDisplay({ usage, model, precomputedCostUsd }: { usage: LlmTok
           <span className={styles.tokenValue}>{usage.total.toLocaleString()}</span>
         </div>
       )}
+      {([['Cached input', usage.cacheReadInput], ['Cache writes', usage.cacheWriteInput],
+        ['Reasoning output', usage.reasoningOutput]] as const).map(([label, count]) => count !== undefined && (
+        <div className={styles.tokenItem} key={label}>
+          <span className={styles.tokenLabel}>{label}:</span>
+          <span className={styles.tokenValue}>{count.toLocaleString()}</span>
+        </div>
+      ))}
       {(() => {
         if (precomputedCostUsd !== undefined) {
           return (
@@ -346,7 +360,7 @@ function extractRetrievalDocuments(tags: KeyValuePair[]): RetrievalDocument[] {
 
 function getAttrValue(tags: KeyValuePair[], key: string): string | undefined {
   const tag = tags.find((t) => t.key === key);
-  return tag !== undefined ? decodeUnicodeEscapes(String(tag.value)) : undefined;
+  return tag !== undefined && tag.value != null ? decodeUnicodeEscapes(typeof tag.value === 'object' ? JSON.stringify(tag.value) : String(tag.value)) : undefined;
 }
 
 function OpenInferenceSpanDetail({ tags, spanKind }: { tags: KeyValuePair[]; spanKind: string }) {
@@ -470,12 +484,12 @@ export function LlmSpanDetail({ tags, logs, operationName }: LlmSpanDetailProps)
     if (isOpenInferenceSpan(tags) && llmData.spanKind && llmData.spanKind.toUpperCase() !== 'EMBEDDING') {
       return <OpenInferenceSpanDetail tags={tags} spanKind={llmData.spanKind} />;
     }
-    if (!isOpenInferenceSpan(tags) || (llmData.spanKind && llmData.spanKind.toUpperCase() !== 'EMBEDDING')) {
+    if (llmData.convention !== 'otel-genai' && (!isOpenInferenceSpan(tags) || (llmData.spanKind && llmData.spanKind.toUpperCase() !== 'EMBEDDING'))) {
       return null;
     }
   }
 
-  const hasTokenUsage = llmData.tokenUsage.input !== undefined || llmData.tokenUsage.output !== undefined || llmData.tokenUsage.total !== undefined;
+  const hasTokenUsage = llmData.isLlm && (llmData.tokenUsage.input !== undefined || llmData.tokenUsage.output !== undefined || llmData.tokenUsage.total !== undefined);
   const hasParams = Object.values(llmData.invocationParams).some((v) => v !== undefined && v !== null);
   // For Vertex/OTel spans, spanKind isn't set by extraction — fall back to getSpanKind(tags)
   const spanKindLabel = llmData.spanKind ?? getSpanKind(tags);
@@ -500,6 +514,17 @@ export function LlmSpanDetail({ tags, logs, operationName }: LlmSpanDetailProps)
         {llmData.system && <span className={styles.conventionBadge}>{llmData.system}</span>}
         {llmData.finishReason && <FinishReasonBadge reason={llmData.finishReason} />}
       </div>
+
+      {llmData.convention === 'otel-genai' && !llmData.isLlm && getAttrValue(tags, 'gen_ai.operation.name') && (
+        <CollapsibleSection title="Operation" testId="otel-operation-section">
+          {(['gen_ai.agent.name', 'gen_ai.workflow.name', 'gen_ai.tool.name', 'gen_ai.tool.call.id',
+            'gen_ai.tool.call.arguments', 'gen_ai.tool.call.result', 'gen_ai.retrieval.query.text',
+            'gen_ai.retrieval.documents', 'gen_ai.memory.query.text', 'gen_ai.memory.records'] as const).map((key) => {
+              const value = getAttrValue(tags, key);
+              return value !== undefined ? <ValueBlock key={key} label={key} value={value} /> : null;
+            })}
+        </CollapsibleSection>
+      )}
 
       {llmData.inputMessages.length > 0 && (
         <CollapsibleSection

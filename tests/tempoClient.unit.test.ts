@@ -3,10 +3,13 @@
 
 import {
   flattenTree,
+  parseOtlpTrace,
+  parseOtlpValue,
   getTraceDurationMs,
   getTraceStartMs,
   type PluginSpan,
 } from '../src/utils/tempoClient.ts';
+import { extractLlmSpanData } from '../src/utils/llmUtils.ts';
 
 // ---------------------------------------------------------------------------
 // Minimal assertion helpers (same style as llmUtils.unit.test.ts)
@@ -236,6 +239,43 @@ describe('BUG-048: self-referencing span is treated as a root (not infinite recu
   assertEquals(flat.length, 1, 'BUG-048: self-referencing span results in single root span');
   assertEquals(flat[0].spanId, 'self', 'BUG-048: self-referencing span has correct spanId');
   assertEquals(flat[0].children.length, 0, 'BUG-048: self-referencing span has no children after fix');
+});
+
+// ---------------------------------------------------------------------------
+// OTLP nested values used by GenAI structured messages and finish reasons
+// ---------------------------------------------------------------------------
+
+describe('OTLP arrays and kv-lists retain their structure for semantic content', () => {
+  assertDeepEquals(parseOtlpValue({ arrayValue: { values: [
+    { stringValue: 'stop' }, { stringValue: 'length' },
+  ] } }), ['stop', 'length'], 'finish reasons stay ordered, not comma-joined');
+  assertDeepEquals(parseOtlpValue({ kvlistValue: { values: [
+    { key: 'type', value: { stringValue: 'text' } },
+    { key: 'content', value: { stringValue: 'Hello' } },
+  ] } }), { type: 'text', content: 'Hello' }, 'nested message part becomes a record');
+  const spans = parseOtlpTrace({ resourceSpans: [{
+    resource: { attributes: [{ key: 'service.name', value: { stringValue: 'otel-example' } }] },
+    scopeSpans: [{ spans: [{
+      traceId: 'trace1', spanId: 'span1', name: 'chat gpt-4o',
+      startTimeUnixNano: '1000000000', endTimeUnixNano: '2000000000',
+      attributes: [
+        { key: 'gen_ai.operation.name', value: { stringValue: 'chat' } },
+        { key: 'gen_ai.provider.name', value: { stringValue: 'openai' } },
+        { key: 'gen_ai.input.messages', value: { arrayValue: { values: [{ kvlistValue: { values: [
+          { key: 'role', value: { stringValue: 'user' } },
+          { key: 'parts', value: { arrayValue: { values: [{ kvlistValue: { values: [
+            { key: 'type', value: { stringValue: 'text' } },
+            { key: 'content', value: { stringValue: 'Hello from Tempo' } },
+          ] } }] } } },
+        ] } }] } } },
+        { key: 'gen_ai.response.finish_reasons', value: { arrayValue: { values: [{ stringValue: 'stop' }] } } },
+      ],
+    }] }],
+  }] });
+  assertEquals(spans.length, 1, 'parsed trace has one span');
+  const llm = extractLlmSpanData(spans[0].tags, spans[0].logs);
+  assertEquals(llm.inputMessages[0].content, 'Hello from Tempo', 'structured OTLP message rendered');
+  assertEquals(llm.finishReason, 'stop', 'OTLP array finish reason rendered');
 });
 
 // ---------------------------------------------------------------------------
